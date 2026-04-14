@@ -22,7 +22,7 @@ The scripts use datasets available in specific R libraries. Ensure these are ins
 The implementations include:
 1. **GEE Modeling:** Parameter estimation using the `glmtoolbox` package, considering AR(2) correlation structures.
 2. **Bootstrap BCa:** Resampling method for obtaining Bias-Corrected and accelerated confidence intervals, providing robust inference for regression, dispersion and correlation parameters.
-3. **Simulated Envelopes:** Diagnostic tool for randomized quantile residuals. The simulation process employs **Gaussian copulas** to account for the intra-cluster dependence structure, ensuring the envelopes correctly reflect the GEE framework.
+3. **Simulated Envelopes:** Diagnostic tool for randomized quantile residuals. The simulation process employs Gaussian copulas to account for the intra-cluster dependence structure, ensuring the envelopes correctly reflect the GEE framework.
 
 ## Required Packages
 To run these scripts, install the following dependencies:
