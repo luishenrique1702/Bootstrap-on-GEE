@@ -6,7 +6,7 @@ This repository contains R scripts for statistical applications using Generalize
 The project focuses on two main applications for longitudinal data analysis:
 - **Application 1 (Bernoulli):** Analysis of the `polypharm` dataset, focusing on polypharmacy among the elderly.
 - **Application 2 (Gamma):** Analysis of the `Milk` dataset, modeling protein content in milk over time.
-- 
+  
 ## Academic Reference
 The codes in this repository are extracted from my Master's dissertation:
 > **Toledo, L. H. C. P.** (2025). *Técnicas de reamostragem e detecção de influência mascarada em equações de estimação generalizadas*. Dissertation (Master's Degree) - Institute of Mathematics and Statistics, University of São Paulo (IME-USP).
