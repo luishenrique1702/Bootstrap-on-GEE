@@ -17,6 +17,10 @@ All the results of the paper *On bootstrap in generalized estimating equations* 
 | `Application 2 - Gamma/Gamma.Rmd` | Application 2: data, bootstrap, envelope and worm plots, sensitivity analysis, type I error of the envelope test, simulation study. |
 | `*.html` (in each folder) | Rendered reports, with the code and all the outputs (tables and figures). Download them and open them in a web browser. |
 
+The rendered reports can be viewed online:
+- [Application 1 (Bernoulli)](https://luishenrique1702.github.io/Bootstrap-on-GEE/Application%201%20-%20Bernoulli/Bernoulli.html)
+- [Application 2 (Gamma)](https://luishenrique1702.github.io/Bootstrap-on-GEE/Application%202%20-%20Gamma/Gamma.html)
+  
 ## Academic Reference
 The paper is based on the Master's dissertation:
 > **Toledo, L. H. C. P.** (2025). *Técnicas de reamostragem e detecção de influência mascarada em equações de estimação generalizadas*. Dissertation (Master's Degree) - Institute of Mathematics and Statistics, University of São Paulo (IME-USP).
