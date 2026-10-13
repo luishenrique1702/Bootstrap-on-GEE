@@ -1,0 +1,509 @@
+---
+title: "On bootstrap in generalized estimating equations"
+subtitle: "Application 1: binary response (polypharm)"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: kable
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 9, fig.height = 8, comment = "")
+```
+
+Application 1 of the paper: the `polypharm` data set (binary response, GEE logistic model with AR(2) working correlation). The functions are in `../functions.R`.
+
+# Configuration
+
+```{r config}
+N_CORES   <- max(1, parallel::detectCores(logical = TRUE) - 2)
+USE_CACHE <- TRUE
+## Tag included in every cache key; change it to recompute all the steps.
+CACHE_TAG <- "v8.1"
+
+## Monte Carlo sizes used in the paper.
+## J = NA means the complete (leave-one-cluster-out) jackknife.
+P <- list(ber = list(R_app = 2000, J_app = NA, B_env = 499, N_outer = 500, B_inner = 99, K_misspec = c(0.5, 1, 2),
+                       S = 1000, S_cov = 300, R_boot_cov = 999, J_cov = 50, N_check = 1000))
+## N_rand: randomizations of the quantile residuals; N_tab4: samples for the
+## residual sums by year; N_temp: samples of the power study against the
+## temporal alternative.
+EXTRA <- list(N_rand = 50, N_tab4 = 1000, N_temp = 300)
+
+DIR_BASE <- tryCatch(dirname(normalizePath(knitr::current_input(dir = TRUE))), error = function(e) NULL)
+if (is.null(DIR_BASE) || !nzchar(DIR_BASE)) DIR_BASE <- getwd()
+DIR_OUT   <- file.path(DIR_BASE, "results")
+DIR_CACHE <- file.path(DIR_OUT, "cache")
+DIR_FIG   <- file.path(DIR_OUT, "figures")
+for (d in c(DIR_CACHE, DIR_FIG)) dir.create(d, recursive = TRUE, showWarnings = FALSE)
+source(file.path(DIR_BASE, "..", "functions.R"))
+cat(sprintf("Parallel processes: %d\n", N_CORES))
+```
+
+# 1 Data and fitted model
+
+```{r ber-data}
+spec_ber <- list(name = "Bernoulli", dist = "bernoulli", resp = "resp",
+                 formula = resp ~ mhv4 + gender + tage + year,
+                 family = binomial("logit"), linkinv = plogis, corstr = "AR-M-dependent(2)")
+
+Poly <- polypharm
+Poly$tage <- log(Poly$age / 100)
+Poly$resp <- as.numeric(Poly$polypharmacy) - 1
+Poly$year <- as.numeric(as.character(Poly$year)) - 2002   # 2002 = 0
+Poly$cid  <- as.character(Poly$id)
+Poly$wave <- Poly$year + 1
+Poly <- Poly[order(match(Poly$cid, unique(Poly$cid)), Poly$wave), ]
+rownames(Poly) <- NULL
+
+ber <- list(spec = spec_ber, data = Poly)
+ber$idx  <- unname(split(seq_len(nrow(Poly)), factor(Poly$cid, levels = unique(Poly$cid))))
+ber$wave <- Poly$wave
+cat(sprintf("Clusters: %d | observations: %d\n", length(ber$idx), nrow(Poly)))
+
+ber$fit <- fit_gee(spec_ber, Poly)
+stopifnot(!is.null(ber$fit))
+cat(sprintf("Seconds per fit: %.2f\n", median(replicate(5, system.time(fit_gee(spec_ber, Poly))[["elapsed"]]))))
+
+ber$beta  <- as.numeric(coef(ber$fit)); ber$names <- coef_names(ber$fit); ber$p <- length(ber$beta)
+ber$phi   <- ber$fit$phi
+ber$rho_lags <- as.numeric(ber$fit$corr[1, -1])
+ber$mu    <- mean_from(spec_ber, Poly, ber$beta)
+ber$y     <- Poly$resp
+
+knitr::kable(data.frame(Parameter = c(ber$names, "phi", paste0("rho", seq_along(ber$rho_lags))),
+                        Estimate = round(c(ber$beta, ber$phi, ber$rho_lags), 4)),
+             caption = "Fitted model (rho3 to rho6: Yule-Walker extension of the AR(2) structure)")
+```
+
+# 2 Descriptive analysis, selection of the correlation structure and of the variables
+
+```{r ber-selection}
+## Tables S2-S6: polypharmacy by nominal variables (column proportions)
+desc_ber <- lapply(c("mhv4", "inptmhv3", "gender", "urban", "comorbid"), function(v) {
+  tb <- table(Polypharmacy = Poly$polypharmacy, Poly[[v]], useNA = "ifany")
+  list(counts = tb, proportions = round(prop.table(tb, 2), 3))
+})
+names(desc_ber) <- c("mhv4", "inptmhv3", "gender", "urban", "comorbid")
+for (v in names(desc_ber)) { cat("\n==", v, "==\n"); print(desc_ber[[v]]$counts); print(desc_ber[[v]]$proportions) }
+
+## Figure S1
+plot_age <- function() {
+  op <- par(mar = c(4.5, 4.5, 1, 1)); on.exit(par(op))
+  boxplot(age ~ polypharmacy + year, data = transform(Poly, year = year + 2002),
+          col = c("#56B4E9", "#E69F00"), xlab = "Year", ylab = "Age (years)", las = 2,
+          names = rep(2002:2008, each = 2), at = rep(1:7, each = 2) * 3 + c(-0.6, 0.6), xaxt = "n")
+  axis(1, at = (1:7) * 3, labels = 2002:2008)
+  legend("topleft", c("At most 3 medications", "More than 3 medications"), fill = c("#56B4E9", "#E69F00"), bty = "n")
+}
+save_pdf("boxplot_age_Bernoulli.pdf", plot_age, 8, 5)
+
+## Table 1: criteria by correlation structure, model with all the covariates
+form_full <- resp ~ mhv4 + inptmhv3 + gender + comorbid + tage + urban + year
+ber$criteria <- criteria_table(form_full, binomial("logit"), Poly)
+knitr::kable(round(ber$criteria, 2), caption = "Table 1. Selection criteria by working correlation structure")
+
+## Backward selection (Wald tests, 5%) with AR(2)
+m_full <- glmtoolbox::glmgee(form_full, id = cid, waves = wave, family = binomial("logit"),
+                             corstr = "AR-M-dependent(2)", data = Poly)
+glmtoolbox::stepCriterion(m_full, direction = "backward", criterion = "p-value",
+                          test = "wald", levels = c(0.05, 0.05))
+
+## Table S7: Wald and generalized score tests for nested models
+F_ber <- list(M1 = resp ~ 1, M2 = resp ~ mhv4, M3 = resp ~ mhv4 + gender, M4 = resp ~ mhv4 + gender + tage,
+              M5 = resp ~ mhv4 + gender + tage + year,
+              M5a = resp ~ mhv4 + gender + tage + year + mhv4:gender, M5b = resp ~ mhv4 + gender + tage + year + mhv4:tage,
+              M5c = resp ~ mhv4 + gender + tage + year + gender:tage, M5d = resp ~ mhv4 + gender + tage + year + mhv4:year,
+              M5e = resp ~ mhv4 + gender + tage + year + gender:year, M5f = resp ~ mhv4 + gender + tage + year + tage:year)
+ber$tests <- nested_tests(F_ber, list(c("M1", "M2"), c("M2", "M3"), c("M3", "M4"), c("M4", "M5"),
+  c("M5", "M5a"), c("M5", "M5b"), c("M5", "M5c"), c("M5", "M5d"), c("M5", "M5e"), c("M5", "M5f")), binomial("logit"), Poly)
+knitr::kable(ber$tests, caption = "Table S7. Wald and generalized score tests")
+```
+
+# 3 Data-generating process: NORTA calibration and oracle check
+
+```{r ber-dgp}
+## True values: fitted model, with phi = 1 (Bernoulli)
+ber$truth <- list(beta = ber$beta, phi = 1, rho1 = ber$rho_lags[1], rho2 = ber$rho_lags[2])
+ber$dgp <- prepare_dgp("bernoulli", ber$mu, 1, ber$rho_lags, ber$idx, ber$wave)
+dg <- ber$dgp$diag
+cat(sprintf("NORTA: %d pairs | %d at the Frechet bounds | max. calibration error %.1e | nearPD: %d of %d clusters\n",
+            dg["n_pairs"], dg["n_bound"], dg["max_error"], dg["n_nearpd"], dg["n_clusters"]))
+
+ber$check <- with_cache("ber_check_dgp", list(P$ber$N_check, ber$rho_lags), {
+  RNGkind("L'Ecuyer-CMRG"); set.seed(999)
+  t(replicate(P$ber$N_check, {
+    y <- generate_y(ber$dgp)
+    c(rho_oracle("bernoulli", y, ber$mu, 1, ber$idx, ber$wave, lags = 1:3),
+      phi_oracle("bernoulli", y, ber$mu))
+  }))
+})
+knitr::kable(bias_table(ber$check, c(ber$rho_lags[1:3], 1), c("rho1", "rho2", "rho3", "phi")),
+             caption = "Table S12 (Bernoulli). Oracle check of the data-generating process")
+```
+
+# 4 Cluster bootstrap and jackknife
+
+```{r ber-bootstrap}
+ctx <- list(spec = spec_ber, data = Poly, idx = ber$idx, p = ber$p)
+ber$boot_app <- with_cache("ber_boot_app", P$ber$R_app,
+  do.call(rbind, run_parallel(P$ber$R_app, task_boot_app, ctx, seed = 111)))
+
+RNGkind("L'Ecuyer-CMRG"); set.seed(222)
+ctx$groups <- jackknife_groups(length(ber$idx), P$ber$J_app)
+ber$jack_app <- with_cache("ber_jack_app", P$ber$J_app,
+  do.call(rbind, run_parallel(max(ctx$groups), task_jack_app, ctx, seed = 222)))
+
+cols <- seq_len(ber$p + 3)
+ok_b <- ber$boot_app[, ber$p + 4] == 1; ok_j <- ber$jack_app[, ber$p + 4] == 1
+cat(sprintf("Bootstrap: %d of %d converged | jackknife: %d of %d\n",
+            sum(ok_b), nrow(ber$boot_app), sum(ok_j), nrow(ber$jack_app)))
+Bb <- ber$boot_app[ok_b, cols, drop = FALSE]; Jb <- ber$jack_app[ok_j, cols, drop = FALSE]
+obs <- c(ber$beta, ber$phi, ber$rho_lags[1:2])
+names_all <- c(ber$names, "phi", "rho1", "rho2")
+
+labels_ber <- c(expression(hat(beta)[0]~"(Intercept)"), expression(hat(beta)[1]~"(1 to 5)"),
+                expression(hat(beta)[2]~"(6 to 14)"),   expression(hat(beta)[3]~"(More than 14)"),
+                expression(hat(beta)[4]~"(Male)"),      expression(hat(beta)[5]~"(log(age/100))"),
+                expression(hat(beta)[6]~"(Year)"),      expression(hat(phi)),
+                expression(hat(rho)[1]),                expression(hat(rho)[2]))
+plot_bootstrap(Bb, Jb, obs, labels_ber, 4, 3)
+save_pdf("bootstrap_plots_polypharm.pdf", function() plot_bootstrap(Bb, Jb, obs, labels_ber, 4, 3))
+
+ci_bca <- t(sapply(cols, function(i) BCa_interval(Bb[, i], obs[i], Jb[, i])))
+ber$table_app <- data.frame(
+  Parameter = names_all, QL_Estimate = round(obs, 5),
+  Boot_Mean = round(colMeans(Bb), 5),
+  Boot_Bias = round(colMeans(Bb) - obs, 5),
+  QL_SE_Robust = round(c(sqrt(diag(vcov(ber$fit, type = "robust"))), NA, NA, NA), 5),
+  Boot_SE = round(apply(Bb, 2, sd), 5),
+  BCa_lower = round(ci_bca[, 1], 5), BCa_upper = round(ci_bca[, 2], 5))
+knitr::kable(ber$table_app, caption = "Tables 2-3. Quasi-likelihood and bootstrap estimates")
+```
+
+# 5 Envelope of the quantile residuals
+
+```{r ber-envelope}
+ctx <- list(spec = spec_ber, data = Poly, dgp = ber$dgp)
+env <- with_cache("ber_envelope", P$ber$B_env,
+                  run_parallel(P$ber$B_env, task_envelope, ctx, seed = 333))
+sims_ber <- do.call(rbind, env)
+cat(sprintf("Failed refits: %d of %d\n", sum(vapply(env, is.null, logical(1))), P$ber$B_env))
+
+## The residuals are randomized: N_rand randomizations against the same
+## simulated envelope; the figure uses the one whose proportion outside the
+## band is closest to the median.
+rand_ber <- t(sapply(seq_len(EXTRA$N_rand), function(m) {
+  set.seed(1000 + m, kind = "L'Ecuyer-CMRG")
+  et <- envelope_test(quantile_residual("bernoulli", ber$y, ber$mu, ber$phi), sims_ber)
+  c(seed = 1000 + m, pct_outside = et$pct_outside, p_value = et$p_value)
+}))
+m_rep <- which.min(abs(rand_ber[, "pct_outside"] - median(rand_ber[, "pct_outside"])))
+set.seed(rand_ber[m_rep, "seed"], kind = "L'Ecuyer-CMRG")
+ber$r_quant <- quantile_residual("bernoulli", ber$y, ber$mu, ber$phi)
+ber$env <- envelope_test(ber$r_quant, sims_ber)
+cat(sprintf("%d randomizations: %% outside median %.1f (Q1 %.1f; Q3 %.1f) | rejections at 5%%: %d | median p-value %.3f (smallest attainable %.3f)\n",
+            nrow(rand_ber), median(rand_ber[, "pct_outside"]), quantile(rand_ber[, "pct_outside"], 0.25),
+            quantile(rand_ber[, "pct_outside"], 0.75), sum(rand_ber[, "p_value"] < 0.05),
+            median(rand_ber[, "p_value"]), 1 / (ber$env$B + 1)))
+cat(sprintf("Figure (seed %d): %.1f%% outside | p = %.3f\n", rand_ber[m_rep, "seed"], ber$env$pct_outside, ber$env$p_value))
+## Twice the median is a valid p-value for dependent p-values (Vovk and Wang, 2020)
+cat(sprintf("Combined p-value (2 x median): %.3f\n", min(1, 2 * median(rand_ber[, "p_value"]))))
+
+## Average residual by group of fitted values and by year in each randomization
+g_pi <- ceiling(8 * rank(ber$mu, ties.method = "first") / length(ber$mu))
+R_groups <- sapply(rand_ber[, "seed"], function(s) {
+  set.seed(s, kind = "L'Ecuyer-CMRG"); r <- quantile_residual("bernoulli", ber$y, ber$mu, ber$phi)
+  c(tapply(r, g_pi, mean), tapply(r, Poly$year, mean)) })
+knitr::kable(data.frame(Group = c(sprintf("pi_hat %d", 1:8), paste("Year", 2002:2008)),
+                        Mean = round(rowMeans(R_groups), 3), Min = round(apply(R_groups, 1, min), 3),
+                        Max = round(apply(R_groups, 1, max), 3)),
+             caption = "Average quantile residual by group over the randomizations")
+
+g <- plot_envelope(ber$env, "Randomized Quantile Residuals"); print(g)
+ggsave(file.path(DIR_FIG, "envelope_Bernoulli.pdf"), g, width = 6, height = 6, device = grDevices::cairo_pdf)
+
+plot_wp <- function() invisible(capture.output({
+  wp(resid = ber$r_quant, ylim.all = 0.8)
+  wp_groups(ber$r_quant, ber$mu, groups = 8, ylim_all = 0.8, label = quote(hat(pi)))
+}))
+plot_wp()
+save_pdf("wp_bernoulli.pdf", plot_wp)
+save_pdf("wp_bernoulli_year.pdf", function() invisible(capture.output(
+  wp_by_value(ber$r_quant, Poly$year + 2002, ylim_all = 0.8, label = "Year"))))
+```
+
+# 6 Residual sums by year and sensitivity to the time trend
+
+```{r ber-year}
+## Table 4: observed sum of residuals by year and its range over N_tab4
+## samples simulated from the fitted model and refitted
+task_tab4 <- function(k, ctx) {
+  y <- generate_y(ctx$dgp); d <- ctx$data; d[[ctx$spec$resp]] <- y
+  fit <- fit_gee(ctx$spec, d)
+  if (is.null(fit) || !isTRUE(fit$converged)) return(rep(NA_real_, 8))
+  r <- y - mean_from(ctx$spec, d, as.numeric(coef(fit)))
+  c(tapply(r, d$year, sum), sum(r))
+}
+EXPORT <- c(EXPORT, "task_tab4")
+ctx <- list(spec = spec_ber, data = Poly, dgp = ber$dgp)
+tab4_sim <- with_cache("ber_tab4", EXTRA$N_tab4,
+                       do.call(rbind, run_parallel(EXTRA$N_tab4, task_tab4, ctx, seed = 555)))
+r_obs <- ber$y - ber$mu
+ber$tab4 <- rbind(Observed_proportion = c(tapply(ber$y, Poly$year, mean), mean(ber$y)),
+                  Mean_fitted         = c(tapply(ber$mu, Poly$year, mean), mean(ber$mu)),
+                  Sum_residuals       = c(tapply(r_obs, Poly$year, sum), sum(r_obs)),
+                  Sim_2.5             = apply(tab4_sim, 2, quantile, 0.025, na.rm = TRUE),
+                  Sim_97.5            = apply(tab4_sim, 2, quantile, 0.975, na.rm = TRUE))
+colnames(ber$tab4) <- c(2002:2008, "Total")
+knitr::kable(round(ber$tab4, 3), caption = sprintf("Table 4. Residual sums by year (%d simulated samples)", sum(complete.cases(tab4_sim))))
+
+## Sensitivity: year^2 added to the linear predictor, with a complete envelope
+## and the same randomizations
+spec_ber2 <- spec_ber; spec_ber2$formula <- resp ~ mhv4 + gender + tage + year + I(year^2)
+ber2 <- list(spec = spec_ber2, data = Poly)
+ber2$fit <- fit_gee(spec_ber2, Poly)
+ber2$beta <- as.numeric(coef(ber2$fit)); ber2$names <- coef_names(ber2$fit)
+ber2$phi <- ber2$fit$phi; ber2$rho_lags <- as.numeric(ber2$fit$corr[1, -1])
+ber2$mu <- mean_from(spec_ber2, Poly, ber2$beta)
+ber2$dgp <- prepare_dgp("bernoulli", ber2$mu, 1, ber2$rho_lags, ber$idx, ber$wave)
+ctx <- list(spec = spec_ber2, data = Poly, dgp = ber2$dgp)
+env2 <- with_cache("ber_envelope_year2", P$ber$B_env,
+                   run_parallel(P$ber$B_env, task_envelope, ctx, seed = 333), model = model_id(ber2))
+sims_ber2 <- do.call(rbind, env2)
+rand_ber2 <- t(sapply(rand_ber[, "seed"], function(s) {
+  set.seed(s, kind = "L'Ecuyer-CMRG")
+  et <- envelope_test(quantile_residual("bernoulli", ber$y, ber2$mu, ber2$phi), sims_ber2)
+  c(pct_outside = et$pct_outside, p_value = et$p_value)
+}))
+r2 <- ber$y - ber2$mu
+sv <- sqrt(diag(vcov(ber2$fit, type = "robust")))
+knitr::kable(data.frame(Parameter = ber2$names, Estimate = round(ber2$beta, 4), Robust_SE = round(sv, 4),
+                        p_value = signif(2 * pnorm(-abs(ber2$beta / sv)), 3)),
+             caption = "Sensitivity: model with year^2")
+print(round(c(tapply(r2, Poly$year, sum), Total = sum(r2)), 1))
+cat(sprintf("Median %% outside: %.1f (linear) vs %.1f (with year^2) | rejections: %d vs %d | phi: %.4f vs %.4f\n",
+            median(rand_ber[, "pct_outside"]), median(rand_ber2[, "pct_outside"]),
+            sum(rand_ber[, "p_value"] < 0.05), sum(rand_ber2[, "p_value"] < 0.05), ber$phi, ber2$phi))
+```
+
+# 7 Envelope diagnostics: level of the residuals and level of the global test
+
+```{r ber-envelope-diagnostics}
+rand_level <- function(mu_x) t(sapply(seq_len(EXTRA$N_rand), function(m) {
+  set.seed(1000 + m, kind = "L'Ecuyer-CMRG")
+  et <- envelope_test(quantile_residual("bernoulli", ber$y, mu_x, 1), sims_ber)
+  c(pct_outside = et$pct_outside, p_value = et$p_value)
+}))
+
+## Table S20: fitted probabilities with only their level corrected
+c0 <- uniroot(function(c) sum(ber$y - plogis(qlogis(ber$mu) + c)), c(-1, 1))$root
+c_year <- sapply(sort(unique(Poly$year)), function(k) {
+  s <- Poly$year == k
+  uniroot(function(c) sum(ber$y[s] - plogis(qlogis(ber$mu[s]) + c)), c(-2, 2))$root
+})
+mus <- list(Fitted_model         = ber$mu,
+            Overall_level        = plogis(qlogis(ber$mu) + c0),
+            Level_in_each_year   = plogis(qlogis(ber$mu) + c_year[Poly$year + 1]))
+knitr::kable(do.call(rbind, lapply(names(mus), function(nm) {
+  a <- rand_level(mus[[nm]])
+  data.frame(Probabilities = nm, Sum_residuals = round(sum(ber$y - mus[[nm]]), 1),
+             Median_outside = round(median(a[, "pct_outside"]), 1),
+             Q1 = round(quantile(a[, "pct_outside"], 0.25), 1), Q3 = round(quantile(a[, "pct_outside"], 0.75), 1),
+             Rejections = sum(a[, "p_value"] < 0.05), row.names = NULL)
+})), caption = sprintf("Table S20. Envelope with corrected level (logit constant %.3f)", c0))
+
+## Points outside the band in the randomization of the figure
+lo <- ber$env$lower; hi <- ber$env$upper; q <- qnorm(ppoints(length(ber$env$r_ord)))
+above <- ber$env$r_ord > hi; below <- ber$env$r_ord < lo
+cat(sprintf("Figure: %d points above the band (theoretical quantiles %.2f to %.2f) and %d below; mean displacement %.3f; central half-width %.3f\n",
+            sum(above), min(q[above]), max(q[above]), sum(below),
+            mean((ber$env$r_ord - ber$env$med)[above]), (hi[length(hi) %/% 2] - lo[length(lo) %/% 2]) / 2))
+
+## Proportion outside the band under the fitted model (each simulated vector
+## against the band, which also contains it)
+pf_H0 <- apply(sims_ber, 1, function(v) 100 * mean(v < lo | v > hi))
+cat(sprintf("%% outside under H0: mean %.1f | median %.1f | P(>= 20%%) = %.3f | 95th percentile %.1f\n",
+            mean(pf_H0), median(pf_H0), mean(pf_H0 >= 20), quantile(pf_H0, 0.95)))
+
+## Level of the global test with exchangeable vectors, with ties counted as in
+## envelope_test() and with randomized tie-breaking
+p_tiebreak <- function(r_obs, sim_ord, level = 0.95) {
+  M <- rbind(sort(r_obs), sim_ord); B <- nrow(sim_ord); k <- max(1, floor((1 - level) / 2 * (B + 1)))
+  rk <- apply(M, 2, rank, ties.method = "random")
+  Tst <- rowSums(rk <= k | rk >= (B + 2 - k))
+  (sum(Tst[-1] > Tst[1]) + runif(1) * (sum(Tst[-1] == Tst[1]) + 1)) / (B + 1)
+}
+level_check <- with_cache("global_test_exchangeable", 6000, {
+  set.seed(7, kind = "L'Ecuyer-CMRG")
+  t(replicate(6000, {
+    M <- t(apply(matrix(rnorm(100 * 300), 100), 1, sort))
+    c(ties = envelope_test(M[1, ], M[-1, ])$p_value < 0.05, tiebreak = p_tiebreak(M[1, ], M[-1, ]) < 0.05)
+  }))
+}, model = NULL)
+print(round(100 * colMeans(level_check), 2))
+```
+
+# 8 Source of the lack of fit: working correlation and `mhv4`
+
+```{r ber-lack-of-fit}
+Poly$fyear <- factor(Poly$year)
+formulas <- list(Linear = resp ~ mhv4 + gender + tage + year,
+                 Quadratic = resp ~ mhv4 + gender + tage + year + I(year^2),
+                 Factor = resp ~ mhv4 + gender + tage + fyear)
+fit_cs <- function(f, cs, data = Poly)
+  if (cs == "Independence") glmtoolbox::glmgee(f, id = cid, family = binomial("logit"), corstr = cs, data = data) else
+    glmtoolbox::glmgee(f, id = cid, waves = wave, family = binomial("logit"), corstr = cs, data = data)
+
+## Table S8 (upper panel): time trend by working correlation
+knitr::kable(do.call(rbind, lapply(names(formulas), function(nm) do.call(rbind, lapply(c("Independence", "AR-M-dependent(2)"), function(cs) {
+  f <- fit_cs(formulas[[nm]], cs); b <- coef(f); se <- sqrt(diag(vcov(f, type = "robust")))
+  X <- model.matrix(delete.response(terms(formulas[[nm]])), Poly); k <- grep("^mhv4", rownames(as.matrix(b)))
+  data.frame(Trend = nm, Correlation = cs, Sum_residuals = round(sum(Poly$resp - plogis(X %*% b)), 1), phi = round(f$phi, 3),
+             t(setNames(sprintf("%.3f (%.3f)", b[k], se[k]), rownames(as.matrix(b))[k])), check.names = FALSE)
+})))), caption = "Table S8 (upper panel). Time trend and working correlation")
+
+## Table S8 (lower panel): mhv4 score decomposed into the patient mean and the
+## yearly deviation from it (Neuhaus and Kalbfleisch, 1998)
+Poly$m <- as.numeric(Poly$mhv4) - 1
+Poly$m_mean <- ave(Poly$m, Poly$cid); Poly$m_dev <- Poly$m - Poly$m_mean
+cat("Patients whose mhv4 changes over the years:", sum(tapply(Poly$m, Poly$cid, function(v) length(unique(v)) > 1)), "\n")
+f_dec <- resp ~ m_mean + m_dev + gender + tage + year
+knitr::kable(do.call(rbind, lapply(c("Independence", "AR-M-dependent(2)"), function(cs) {
+  f <- fit_cs(f_dec, cs); b <- coef(f); se <- sqrt(diag(vcov(f, type = "robust")))
+  X <- model.matrix(~ m_mean + m_dev + gender + tage + year, Poly)
+  data.frame(Correlation = cs, Sum_residuals = round(sum(Poly$resp - plogis(X %*% b)), 1), phi = round(f$phi, 3),
+             Between = sprintf("%.3f (%.3f)", b[2], se[2]), Within = sprintf("%.3f (%.3f)", b[3], se[3]))
+})), caption = "Table S8 (lower panel). Between- and within-patient effects of mhv4")
+
+## Residual sums by year for the models with year^2 (1000 samples) and with
+## year as a factor (400 samples)
+tab4_model <- function(formula, N, name) {
+  sp <- spec_ber; sp$formula <- formula
+  f <- fit_gee(sp, Poly); mu <- mean_from(sp, Poly, as.numeric(coef(f)))
+  dg <- prepare_dgp("bernoulli", mu, 1, as.numeric(f$corr[1, -1]), ber$idx, ber$wave)
+  obj <- list(spec = sp, data = Poly, beta = as.numeric(coef(f)), phi = f$phi, rho_lags = as.numeric(f$corr[1, -1]))
+  sims <- with_cache(name, N, do.call(rbind, run_parallel(N, task_tab4, list(spec = sp, data = Poly, dgp = dg), seed = 555)),
+                     model = model_id(obj))
+  r <- Poly$resp - mu
+  out <- rbind(Sum = c(tapply(r, Poly$year, sum), sum(r)),
+               Sim_2.5 = apply(sims, 2, quantile, 0.025, na.rm = TRUE), Sim_97.5 = apply(sims, 2, quantile, 0.975, na.rm = TRUE))
+  colnames(out) <- c(2002:2008, "Total"); round(out, 1)
+}
+print(tab4_model(formulas$Quadratic, 1000, "ber_tab4_year2"))
+print(tab4_model(formulas$Factor, 400, "ber_tab4_factor"))
+```
+
+# 9 Type I error and power of the envelope test
+
+H0: data generated from the fitted model and fitted with it. H1(k): data
+generated with the coefficient of `tage` multiplied by k and fitted without
+`tage`. Rejection: p-value of the global test below 0.05.
+
+```{r ber-type1}
+ber$type1 <- with_cache("ber_type1", P$ber[c("N_outer", "B_inner", "K_misspec")], {
+  scenarios <- list(H0 = list(k = 1, spec = spec_ber))
+  for (k in P$ber$K_misspec) {
+    sr <- spec_ber; sr$formula <- resp ~ mhv4 + gender + year
+    scenarios[[sprintf("H1_k=%g", k)]] <- list(k = k, spec = sr)
+  }
+  pos_tage <- which(ber$names == "tage")
+  lapply(seq_along(scenarios), function(s) {
+    sc <- scenarios[[s]]
+    b <- ber$beta; b[pos_tage] <- b[pos_tage] * sc$k
+    mu_v <- mean_from(spec_ber, Poly, b)
+    dgp_v <- prepare_dgp("bernoulli", mu_v, 1, ber$rho_lags, ber$idx, ber$wave)
+    ctx <- list(spec_fit = sc$spec, data = Poly, idx = ber$idx, wave = ber$wave,
+                dgp_true = dgp_v, B_inner = P$ber$B_inner)
+    res <- do.call(rbind, run_parallel(P$ber$N_outer, task_type1, ctx, seed = 444 + s,
+      ckpt = checkpoint_dir(paste0("ber_type1_", names(scenarios)[s]), P$ber[c("N_outer", "B_inner", "K_misspec")])))
+    data.frame(Scenario = names(scenarios)[s], res)
+  })
+})
+knitr::kable(type1_summary(ber$type1), caption = "Table S18 (Bernoulli). Type I error and power of the global test")
+```
+
+H1t(k): data generated from the model with `year^2` (the sensitivity analysis above), with the
+coefficient of `year^2` multiplied by k, and fitted with the main-effects model.
+
+```{r ber-power-temporal}
+ber$power_temp <- with_cache("ber_power_temporal", list(EXTRA$N_temp, P$ber[c("B_inner", "K_misspec")]), {
+  pos_q <- which(ber2$names == "I(year^2)")
+  lapply(seq_along(P$ber$K_misspec), function(s) {
+    k <- P$ber$K_misspec[s]
+    b <- ber2$beta; b[pos_q] <- b[pos_q] * k
+    mu_v <- mean_from(spec_ber2, Poly, b)
+    dgp_v <- prepare_dgp("bernoulli", mu_v, 1, ber2$rho_lags, ber$idx, ber$wave)
+    ctx <- list(spec_fit = spec_ber, data = Poly, idx = ber$idx, wave = ber$wave,
+                dgp_true = dgp_v, B_inner = P$ber$B_inner)
+    name <- sprintf("H1t_k=%g", k)
+    res <- do.call(rbind, run_parallel(EXTRA$N_temp, task_type1, ctx, seed = 777 + s,
+      ckpt = checkpoint_dir(paste0("ber_power_temporal_", name), list(EXTRA$N_temp, P$ber[c("B_inner", "K_misspec")]))))
+    data.frame(Scenario = name, res)
+  })
+})
+knitr::kable(type1_summary(ber$power_temp), caption = "Table S19. Power against the temporal alternative")
+
+## Part of the omitted term not absorbed by the fitted model (SD of the
+## residuals of its regression on the covariates of the fitted model), in units
+## of pi/sqrt(3) (Section S.8)
+print(round(c(
+  tage  = size_omitted(ber$beta[ber$names == "tage"] * Poly$tage,
+                       model.matrix(~ mhv4 + gender + year, data = Poly)[, -1], pi / sqrt(3)),
+  year2 = size_omitted(ber2$beta[ber2$names == "I(year^2)"] * Poly$year^2,
+                       model.matrix(~ mhv4 + gender + tage + year, data = Poly)[, -1], pi / sqrt(3))), 3))
+```
+
+# 10 Simulation study: bias and Wald coverage
+
+```{r ber-simulation}
+ctx <- list(spec = spec_ber, data = Poly, idx = ber$idx, wave = ber$wave,
+            dgp = ber$dgp, truth = ber$truth, p = ber$p)
+ber$sim <- with_cache("ber_sim", list(P$ber$S, ber$rho_lags),
+  do.call(rbind, run_parallel(P$ber$S, task_sim, ctx, seed = 42)))
+
+p <- ber$p; S <- ber$sim
+est  <- S[, 1:(p + 3), drop = FALSE]
+conv <- S[, p + 4] == 1
+cov  <- S[, p + 7 + seq_len(3 * p), drop = FALSE]
+cat(sprintf("Replicates: %d | converged: %d\n", nrow(S), sum(conv)))
+truth <- c(ber$truth$beta, ber$truth$phi, ber$truth$rho1, ber$truth$rho2)
+
+knitr::kable(bias_table(est[conv, , drop = FALSE], truth, names_all), caption = "Table S13. Simulation study, Bernoulli model")
+knitr::kable(cbind(
+  coverage_table(cov[conv, 1:p, drop = FALSE], ber$names)[, 1:3],
+  coverage_table(cov[conv, p + 1:p, drop = FALSE], ber$names)[, 2:3],
+  coverage_table(cov[conv, 2 * p + 1:p, drop = FALSE], ber$names)[, 2:4]) |>
+  setNames(c("Effect", "Robust_%", "MCSE", "Model_based_%", "MCSE", "Bias_corrected_%", "MCSE", "n")),
+  caption = "Table S15 (Bernoulli). Coverage of the 95% Wald intervals")
+
+labels_sim_ber <- c(lapply(0:6, function(j) bquote(hat(beta)[.(j)])),
+                    expression(hat(phi)), expression(hat(rho)[1]), expression(hat(rho)[2]))
+plot_simulation(est[conv, , drop = FALSE], truth, labels_sim_ber, 3, 4)
+save_pdf("simulation_Bernoulli.pdf",
+         function() plot_simulation(est[conv, , drop = FALSE], truth, labels_sim_ber, 3, 4), 12, 10)
+```
+
+# 11 Coverage of the bootstrap intervals
+
+```{r ber-coverage}
+ctx <- list(spec = spec_ber, data = Poly, idx = ber$idx, dgp = ber$dgp, truth = ber$truth,
+            names = ber$names, R_boot = P$ber$R_boot_cov, J_cov = P$ber$J_cov)
+ber$cov <- with_cache("ber_coverage", P$ber[c("S_cov", "R_boot_cov", "J_cov")],
+  do.call(rbind, run_parallel(P$ber$S_cov, task_coverage, ctx, seed = 2024,
+    ckpt = checkpoint_dir("ber_coverage", P$ber[c("S_cov", "R_boot_cov", "J_cov")]))))
+
+rc <- coverage_summary(ber$cov, truth, est[conv, , drop = FALSE], ber$names)
+cat(sprintf("Replicates with converged original fit: %d of %d\n", rc$n_valid, nrow(ber$cov)))
+knitr::kable(rc$coverage, caption = "Tables 8, S16 (Bernoulli). Coverage of the 95% intervals")
+knitr::kable(rc$bias, caption = "Table 8b (Bernoulli). Bootstrap versus true bias and standard error")
+knitr::kable(paired_comparison(ber$cov, ber$names), caption = "Table S17 (Bernoulli). Bootstrap versus robust Wald, paired")
+```
+
+# Session information
+
+```{r session}
+sessionInfo()
+```

@@ -1,0 +1,359 @@
+---
+title: "On bootstrap in generalized estimating equations"
+subtitle: "Application 2: gamma response (Milk)"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: kable
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 9, fig.height = 8, comment = "")
+```
+
+Application 2 of the paper: the `Milk` data set (gamma response, GEE-gamma log-linear model with AR(2) working correlation). The functions are in `../functions.R`.
+
+# Configuration
+
+```{r config}
+N_CORES   <- max(1, parallel::detectCores(logical = TRUE) - 2)
+USE_CACHE <- TRUE
+## Tag included in every cache key; change it to recompute all the steps.
+CACHE_TAG <- "v8.1"
+
+## Monte Carlo sizes used in the paper.
+## J = NA means the complete (leave-one-cluster-out) jackknife.
+P <- list(gam = list(R_app = 2000, J_app = NA, B_env = 499, N_outer = 500, B_inner = 99, K_misspec = c(0.5, 1, 2),
+                       S = 1000, S_cov = 300, R_boot_cov = 999, J_cov = NA, N_check = 1000))
+
+DIR_BASE <- tryCatch(dirname(normalizePath(knitr::current_input(dir = TRUE))), error = function(e) NULL)
+if (is.null(DIR_BASE) || !nzchar(DIR_BASE)) DIR_BASE <- getwd()
+DIR_OUT   <- file.path(DIR_BASE, "results")
+DIR_CACHE <- file.path(DIR_OUT, "cache")
+DIR_FIG   <- file.path(DIR_OUT, "figures")
+for (d in c(DIR_CACHE, DIR_FIG)) dir.create(d, recursive = TRUE, showWarnings = FALSE)
+source(file.path(DIR_BASE, "..", "functions.R"))
+cat(sprintf("Parallel processes: %d\n", N_CORES))
+```
+
+# 1 Data and fitted model
+
+```{r gam-data}
+spec_gam <- list(name = "Gamma", dist = "gamma", resp = "protein",
+                 formula = protein ~ Diet + Time + I(Time^2),
+                 family = Gamma("log"), linkinv = exp, corstr = "AR-M-dependent(2)")
+
+data(Milk, package = "nlme")
+Milk <- as.data.frame(Milk)
+attributes(Milk)[c("formula", "outer", "labels", "units")] <- NULL
+Milk$Cow  <- factor(as.character(Milk$Cow))
+Milk$cid  <- as.character(Milk$Cow)
+Milk$wave <- as.integer(Milk$Time)
+Milk <- Milk[order(match(Milk$cid, unique(Milk$cid)), Milk$wave), ]
+rownames(Milk) <- NULL
+
+gam <- list(spec = spec_gam, data = Milk)
+gam$idx  <- unname(split(seq_len(nrow(Milk)), factor(Milk$cid, levels = unique(Milk$cid))))
+gam$wave <- Milk$wave
+gaps <- vapply(gam$idx, function(ii) any(diff(Milk$wave[ii]) != 1), logical(1))
+cat(sprintf("Cows: %d | observations: %d | cows with missing weeks: %d\n", length(gam$idx), nrow(Milk), sum(gaps)))
+
+gam$fit <- fit_gee(spec_gam, Milk)
+stopifnot(!is.null(gam$fit))
+cat(sprintf("Seconds per fit: %.2f\n", median(replicate(5, system.time(fit_gee(spec_gam, Milk))[["elapsed"]]))))
+
+gam$beta <- as.numeric(coef(gam$fit)); gam$names <- coef_names(gam$fit); gam$p <- length(gam$beta)
+gam$phi  <- gam$fit$phi
+gam$rho_lags <- as.numeric(gam$fit$corr[1, -1])
+gam$mu   <- mean_from(spec_gam, Milk, gam$beta)
+gam$y    <- Milk$protein
+knitr::kable(data.frame(Parameter = c(gam$names, "phi", paste0("rho", 1:4)),
+                        Estimate = signif(c(gam$beta, gam$phi, gam$rho_lags[1:4]), 5)),
+             caption = "Fitted model (lags defined by the week)")
+```
+
+# 2 Descriptive analysis and model selection
+
+```{r gam-descriptive}
+diet_cols   <- c("barley" = "#D55E00", "barley+lupins" = "#009E73", "lupins" = "#0072B2")
+diet_labels <- c("Barley", "Barley + Lupins", "Lupins")
+plot_profiles <- function() {
+  op <- par(mfrow = c(2, 2), mar = c(4.2, 4.4, 2.2, 0.8), cex.lab = 1.25, cex.axis = 1.1, cex.main = 1.25); on.exit(par(op))
+  diets <- levels(Milk$Diet)
+  boxplot(protein ~ Diet, data = Milk, col = adjustcolor(diet_cols[diets], 0.6), border = "grey25", whisklty = 1,
+          names = diet_labels, xlab = "Diet", ylab = "Protein (%)", main = "(a) Boxplots by diet", las = 1)
+  plot(range(Milk$Time), range(Milk$protein), type = "n", xlab = "Week", ylab = "Protein (%)",
+       main = "(b) Individual profiles", las = 1)
+  for (ii in gam$idx) lines(Milk$Time[ii], Milk$protein[ii], col = adjustcolor(diet_cols[as.character(Milk$Diet[ii[1]])], 0.45))
+  legend("topright", diet_labels, col = diet_cols[diets], lwd = 2, bty = "n", cex = 1)
+  med <- with(Milk, tapply(protein, list(Time, Diet), mean))
+  matplot(as.numeric(rownames(med)), med[, diets], type = "b", pch = 16, lty = 1, lwd = 2, cex = 0.8,
+          col = diet_cols[diets], xlab = "Week", ylab = "Mean protein (%)", main = "(c) Mean profiles", las = 1)
+  legend("topright", diet_labels, col = diet_cols[diets], lwd = 2, pch = 16, bty = "n", cex = 1)
+  se  <- with(Milk, tapply(protein, list(Time, Diet), function(v) sd(v) / sqrt(length(v))))
+  wk <- as.numeric(rownames(med)); shift <- c(-0.2, 0, 0.2)
+  plot(c(0.6, 19.4), range(med - se, med + se, na.rm = TRUE), type = "n", xlab = "Week", xaxt = "n",
+       ylab = "Mean protein (%)", main = expression(bold("(d) Mean" %+-% "standard error")), las = 1)
+  axis(1, at = c(5, 10, 15))
+  for (k in seq_along(diets)) {
+    x <- wk + shift[k]; m <- med[, diets[k]]; e <- se[, diets[k]]
+    arrows(x, m - e, x, m + e, angle = 90, code = 3, length = 0.02, col = diet_cols[diets[k]])
+    points(x, m, pch = 16, cex = 0.7, col = diet_cols[diets[k]])
+  }
+  legend("topright", diet_labels, col = diet_cols[diets], pch = 16, bty = "n", cex = 1)
+}
+plot_profiles()
+save_pdf("profiles_gamma.pdf", plot_profiles, 8, 6.6)
+
+## Table S9: descriptive statistics by diet
+f_desc <- function(v) c(Cows = NA, Obs = length(v), Mean = mean(v), SD = sd(v), CV = 100 * sd(v) / mean(v), Min = min(v), Max = max(v))
+gam$desc <- rbind(do.call(rbind, tapply(Milk$protein, Milk$Diet, f_desc)), Total = f_desc(Milk$protein))
+gam$desc[, "Cows"] <- c(tapply(Milk$cid, Milk$Diet, function(v) length(unique(v))), length(unique(Milk$cid)))
+knitr::kable(round(gam$desc, 3), caption = "Table S9. Protein content by diet")
+cat(sprintf("Skewness: %.2f\n", mean((Milk$protein - mean(Milk$protein))^3) / sd(Milk$protein)^3))
+print(round(with(Milk, tapply(protein, list(Time, Diet), mean)), 3))
+last_week <- tapply(Milk$Time, Milk$cid, max)
+cat("Last observed week:\n"); print(table(last_week))
+cat("Cows reaching week 19 by diet:\n"); print(table(Milk$Diet[match(names(last_week)[last_week == 19], Milk$cid)]))
+
+## Empirical correlations (pairs of the same cow by lag, weekly means of each
+## diet removed) and correlations implied by the fitted AR(2) structure
+r_emp <- Milk$protein - ave(Milk$protein, Milk$Time, Milk$Diet)
+gam$cor_emp <- sapply(1:5, function(h) {
+  W <- reshape(data.frame(cid = Milk$cid, t = Milk$Time, r = r_emp), idvar = "cid", timevar = "t", direction = "wide")
+  C <- cor(W[, -1], use = "pairwise.complete.obs"); tt <- as.numeric(sub("r.", "", colnames(C)))
+  mean(C[abs(outer(tt, tt, "-")) == h], na.rm = TRUE)
+})
+print(rbind(empirical = round(gam$cor_emp, 3), AR2_fitted = round(gam$rho_lags[1:5], 3)))
+
+## Table 5: criteria by correlation structure
+gam$criteria <- criteria_table(spec_gam$formula, Gamma("log"), Milk)
+knitr::kable(round(gam$criteria, 2), caption = "Table 5. Selection criteria by working correlation structure")
+
+## Table S10: Wald and generalized score tests
+F_gam <- list(M1 = protein ~ 1, M2 = protein ~ Diet, M3 = protein ~ Diet + Time, M4 = protein ~ Diet + Time + I(Time^2),
+              M4a = protein ~ Diet + Time + I(Time^2) + Diet:Time,
+              M4b = protein ~ Diet + Time + I(Time^2) + Diet:Time + Diet:I(Time^2))
+knitr::kable(nested_tests(F_gam, list(c("M1", "M2"), c("M2", "M3"), c("M3", "M4"), c("M4", "M4a"), c("M4", "M4b")),
+                          Gamma("log"), Milk), caption = "Table S10. Wald and generalized score tests")
+```
+
+# 3 Data-generating process: oracle check
+
+```{r gam-dgp}
+gam$truth <- list(beta = gam$beta, phi = gam$phi, rho1 = gam$rho_lags[1], rho2 = gam$rho_lags[2])
+gam$dgp <- prepare_dgp("gamma", gam$mu, gam$phi, gam$rho_lags, gam$idx, gam$wave)
+cat(sprintf("nearPD: %d of %d clusters\n", gam$dgp$diag["n_nearpd"], gam$dgp$diag["n_clusters"]))
+
+gam$check <- with_cache("gam_check_dgp", list(P$gam$N_check, gam$rho_lags), {
+  RNGkind("L'Ecuyer-CMRG"); set.seed(999)
+  t(replicate(P$gam$N_check, {
+    y <- generate_y(gam$dgp)
+    c(rho_oracle("gamma", y, gam$mu, gam$phi, gam$idx, gam$wave, lags = 1:3),
+      phi_oracle("gamma", y, gam$mu))
+  }))
+})
+knitr::kable(bias_table(gam$check, c(gam$rho_lags[1:3], gam$phi), c("rho1", "rho2", "rho3", "phi")),
+             caption = "Table S12 (gamma). Oracle check of the data-generating process")
+```
+
+# 4 Cluster bootstrap and jackknife
+
+```{r gam-bootstrap}
+ctx <- list(spec = spec_gam, data = Milk, idx = gam$idx, p = gam$p)
+gam$boot_app <- with_cache("gam_boot_app", P$gam$R_app,
+  do.call(rbind, run_parallel(P$gam$R_app, task_boot_app, ctx, seed = 111)))
+
+RNGkind("L'Ecuyer-CMRG"); set.seed(222)
+ctx$groups <- jackknife_groups(length(gam$idx), P$gam$J_app)
+gam$jack_app <- with_cache("gam_jack_app", P$gam$J_app,
+  do.call(rbind, run_parallel(max(ctx$groups), task_jack_app, ctx, seed = 222)))
+
+cols <- seq_len(gam$p + 3)
+ok_b <- gam$boot_app[, gam$p + 4] == 1; ok_j <- gam$jack_app[, gam$p + 4] == 1
+cat(sprintf("Bootstrap: %d of %d converged | jackknife: %d of %d\n",
+            sum(ok_b), nrow(gam$boot_app), sum(ok_j), nrow(gam$jack_app)))
+Bg <- gam$boot_app[ok_b, cols, drop = FALSE]; Jg <- gam$jack_app[ok_j, cols, drop = FALSE]
+obs_g <- c(gam$beta, gam$phi, gam$rho_lags[1:2])
+
+labels_gam <- c(expression(hat(beta)[0]~"(Intercept)"), expression(hat(beta)[1]~"(Barley+Lupins)"),
+                expression(hat(beta)[2]~"(Lupins)"),    expression(hat(beta)[3]~"(Week)"),
+                expression(hat(beta)[4]~"(Week"^2*")"), expression(hat(phi)),
+                expression(hat(rho)[1]),                expression(hat(rho)[2]))
+plot_bootstrap(Bg, Jg, obs_g, labels_gam, 3, 3)
+save_pdf("bootstrap_plots_milk.pdf", function() plot_bootstrap(Bg, Jg, obs_g, labels_gam, 3, 3))
+
+ci_bca <- t(sapply(cols, function(i) BCa_interval(Bg[, i], obs_g[i], Jg[, i])))
+knitr::kable(data.frame(
+  Parameter = c(gam$names, "phi", "rho1", "rho2"), QL_Estimate = signif(obs_g, 5),
+  Boot_Mean = signif(colMeans(Bg), 5), Boot_Bias = signif(colMeans(Bg) - obs_g, 5),
+  QL_SE_Robust = signif(c(sqrt(diag(vcov(gam$fit, type = "robust"))), NA, NA, NA), 5),
+  Boot_SE = signif(apply(Bg, 2, sd), 5),
+  BCa_lower = signif(ci_bca[, 1], 5), BCa_upper = signif(ci_bca[, 2], 5)),
+  caption = "Tables 6-7. Quasi-likelihood and bootstrap estimates")
+```
+
+# 5 Envelope and worm plots
+
+```{r gam-envelope}
+gam$r_quant <- quantile_residual("gamma", gam$y, gam$mu, gam$phi)
+ctx <- list(spec = spec_gam, data = Milk, dgp = gam$dgp)
+env <- with_cache("gam_envelope", P$gam$B_env,
+                  run_parallel(P$gam$B_env, task_envelope, ctx, seed = 333))
+gam$env <- envelope_test(gam$r_quant, do.call(rbind, env))
+cat(sprintf("Failed refits: %d | outside the band: %.1f%% | global test p-value: %.3f (B = %d)\n",
+            sum(vapply(env, is.null, logical(1))), gam$env$pct_outside, gam$env$p_value, gam$env$B))
+
+g <- plot_envelope(gam$env, "Quantile Residuals"); print(g)
+ggsave(file.path(DIR_FIG, "envelope_gamma.pdf"), g, width = 6, height = 6, device = grDevices::cairo_pdf)
+
+plot_wp_g <- function() invisible(capture.output(wp(resid = gam$r_quant, ylim.all = 1)))
+plot_wp_g()
+save_pdf("wp_gamma.pdf", plot_wp_g)
+## Worm plots by intervals of weeks (Figure 8)
+weeks <- list("1-2" = 1:2, "3-4" = 3:4, "5-6" = 5:6, "7-8" = 7:8, "9-10" = 9:10, "11-13" = 11:13, "14-16" = 14:16, "17-19" = 17:19)
+save_pdf("wp_gamma_weeks.pdf", function() invisible(capture.output(
+  wp_by_value(gam$r_quant, Milk$Time, ylim_all = 1, label = "Weeks", groups = weeks))))
+```
+
+# 6 Sensitivity to the form of the time trend
+
+```{r gam-sensitivity}
+spec_gam2 <- spec_gam; spec_gam2$formula <- protein ~ Diet + Time + exp(-Time)
+gam2 <- list(spec = spec_gam2, data = Milk)
+gam2$fit <- fit_gee(spec_gam2, Milk)
+gam2$beta <- as.numeric(coef(gam2$fit)); gam2$names <- coef_names(gam2$fit)
+gam2$phi <- gam2$fit$phi; gam2$rho_lags <- as.numeric(gam2$fit$corr[1, -1])
+gam2$mu <- mean_from(spec_gam2, Milk, gam2$beta)
+obs_week <- tapply(Milk$protein, Milk$Time, mean)
+weekly_fit <- function(mu) c(RMSE_weekly = sqrt(mean((obs_week - tapply(mu, Milk$Time, mean))^2)),
+                             Max_weekly_sum = max(abs(tapply(Milk$protein - mu, Milk$Time, sum))),
+                             Week_minimum = as.numeric(names(which.min(tapply(mu, Milk$Time, mean)))))
+sv1 <- sqrt(diag(vcov(gam$fit, type = "robust"))); sv2 <- sqrt(diag(vcov(gam2$fit, type = "robust")))
+diet <- grep("^Diet", gam$names)
+gam2$dgp <- prepare_dgp("gamma", gam2$mu, gam2$phi, gam2$rho_lags, gam$idx, gam$wave)
+ctx <- list(spec = spec_gam2, data = Milk, dgp = gam2$dgp)
+env_g2 <- with_cache("gam_envelope_exp", P$gam$B_env,
+                     run_parallel(P$gam$B_env, task_envelope, ctx, seed = 333), model = model_id(gam2))
+et2 <- envelope_test(quantile_residual("gamma", gam$y, gam2$mu, gam2$phi), do.call(rbind, env_g2))
+knitr::kable(data.frame(Effect = gam$names[diet],
+                        Quadratic = sprintf("%.4f (%.4f)", gam$beta[diet], sv1[diet]),
+                        Week_expWeek = sprintf("%.4f (%.4f)", gam2$beta[diet], sv2[diet])),
+             caption = "Diet effects (robust SE) under the two trends")
+knitr::kable(round(rbind(Quadratic = weekly_fit(gam$mu), Week_expWeek = weekly_fit(gam2$mu)), 3),
+             caption = "Fit of the weekly mean profiles")
+cat(sprintf("Envelope, Week + exp(-Week) with AR(2): %.1f%% outside, p = %.3f\n", et2$pct_outside, et2$p_value))
+
+## Table S11: independence and AR(2) working correlations under the two trends
+knitr::kable(do.call(rbind, lapply(list(Quadratic = spec_gam, Week_expWeek = spec_gam2), function(sp) {
+  do.call(rbind, lapply(c("Independence", "AR-M-dependent(2)"), function(cs) {
+    s2 <- sp; s2$corstr <- cs; f <- fit_gee(s2, Milk); b <- as.numeric(coef(f)); mu <- mean_from(s2, Milk, b)
+    se <- sqrt(diag(vcov(f, type = "robust"))); j <- grep("^Diet", coef_names(f))
+    data.frame(Formula = paste(deparse(sp$formula), collapse = ""), Correlation = cs, Mean_fitted = round(mean(mu), 4),
+               Sum_residuals = round(sum(Milk$protein - mu), 1),
+               BL = sprintf("%.4f (%.4f)", b[j[1]], se[j[1]]), L = sprintf("%.4f (%.4f)", b[j[2]], se[j[2]]))
+  }))
+})), caption = sprintf("Table S11. Independence versus AR(2) (observed mean %.4f)", mean(Milk$protein)))
+
+## Envelopes with the independence working correlation (responses generated
+## with the AR(2) correlation of the same mean model)
+envelope_indep <- function(sp_mean, name) {
+  si <- sp_mean; si$corstr <- "Independence"
+  fi <- fit_gee(si, Milk); bi <- as.numeric(coef(fi)); mui <- mean_from(si, Milk, bi)
+  fa <- fit_gee(sp_mean, Milk)
+  dg <- prepare_dgp("gamma", mui, fi$phi, as.numeric(fa$corr[1, -1]), gam$idx, gam$wave)
+  obj <- list(spec = si, data = Milk, beta = bi, phi = fi$phi, rho_lags = as.numeric(fa$corr[1, -1]))
+  sims <- with_cache(name, P$gam$B_env, run_parallel(P$gam$B_env, task_envelope, list(spec = si, data = Milk, dgp = dg), seed = 333),
+                     model = model_id(obj))
+  et <- envelope_test(quantile_residual("gamma", gam$y, mui, fi$phi), do.call(rbind, sims))
+  c(pct_outside = et$pct_outside, p_value = et$p_value)
+}
+knitr::kable(round(rbind(Quadratic = envelope_indep(spec_gam, "gam_envelope_indep_quad"),
+                         Week_expWeek = envelope_indep(spec_gam2, "gam_envelope_indep_exp")), 3),
+             caption = "Envelopes with the independence working correlation")
+```
+
+# 7 Type I error and power of the envelope test
+
+H1(k): coefficient of `Time^2` multiplied by k in the generation; the model is
+fitted without the quadratic term.
+
+```{r gam-type1}
+gam$type1 <- with_cache("gam_type1", P$gam[c("N_outer", "B_inner", "K_misspec")], {
+  scenarios <- list(H0 = list(k = 1, spec = spec_gam))
+  for (k in P$gam$K_misspec) {
+    sr <- spec_gam; sr$formula <- protein ~ Diet + Time
+    scenarios[[sprintf("H1_k=%g", k)]] <- list(k = k, spec = sr)
+  }
+  pos_q <- which(gam$names == "I(Time^2)")
+  lapply(seq_along(scenarios), function(s) {
+    sc <- scenarios[[s]]
+    b <- gam$beta; b[pos_q] <- b[pos_q] * sc$k
+    mu_v <- mean_from(spec_gam, Milk, b)
+    dgp_v <- prepare_dgp("gamma", mu_v, gam$phi, gam$rho_lags, gam$idx, gam$wave)
+    ctx <- list(spec_fit = sc$spec, data = Milk, idx = gam$idx, wave = gam$wave,
+                dgp_true = dgp_v, B_inner = P$gam$B_inner)
+    res <- do.call(rbind, run_parallel(P$gam$N_outer, task_type1, ctx, seed = 444 + s,
+      ckpt = checkpoint_dir(paste0("gam_type1_", names(scenarios)[s]), P$gam[c("N_outer", "B_inner", "K_misspec")])))
+    data.frame(Scenario = names(scenarios)[s], res)
+  })
+})
+cat(sprintf("Part of beta * Week^2 not absorbed by Diet + Week: %.3f (units of sqrt(phi))\n",
+            size_omitted(gam$beta[gam$names == "I(Time^2)"] * Milk$Time^2,
+                         model.matrix(~ Diet + Time, data = Milk)[, -1], sqrt(gam$phi))))
+knitr::kable(type1_summary(gam$type1), caption = "Table S18 (gamma). Type I error and power of the global test")
+```
+
+# 8 Simulation study: bias and Wald coverage
+
+```{r gam-simulation}
+ctx <- list(spec = spec_gam, data = Milk, idx = gam$idx, wave = gam$wave,
+            dgp = gam$dgp, truth = gam$truth, p = gam$p)
+gam$sim <- with_cache("gam_sim", list(P$gam$S, gam$rho_lags),
+  do.call(rbind, run_parallel(P$gam$S, task_sim, ctx, seed = 42)))
+
+p <- gam$p; S <- gam$sim
+est  <- S[, 1:(p + 3), drop = FALSE]
+conv <- S[, p + 4] == 1
+cov  <- S[, p + 7 + seq_len(3 * p), drop = FALSE]
+cat(sprintf("Replicates: %d | converged: %d\n", nrow(S), sum(conv)))
+truth <- c(gam$truth$beta, gam$truth$phi, gam$truth$rho1, gam$truth$rho2)
+names_all <- c(gam$names, "phi", "rho1", "rho2")
+
+knitr::kable(bias_table(est[conv, , drop = FALSE], truth, names_all), caption = "Table S14. Simulation study, gamma model")
+knitr::kable(cbind(
+  coverage_table(cov[conv, 1:p, drop = FALSE], gam$names)[, 1:3],
+  coverage_table(cov[conv, p + 1:p, drop = FALSE], gam$names)[, 2:3],
+  coverage_table(cov[conv, 2 * p + 1:p, drop = FALSE], gam$names)[, 2:4]) |>
+  setNames(c("Effect", "Robust_%", "MCSE", "Model_based_%", "MCSE", "Bias_corrected_%", "MCSE", "n")),
+  caption = "Table S15 (gamma). Coverage of the 95% Wald intervals")
+
+labels_sim_gam <- c(lapply(0:4, function(j) bquote(hat(beta)[.(j)])),
+                    expression(hat(phi)), expression(hat(rho)[1]), expression(hat(rho)[2]))
+plot_simulation(est[conv, , drop = FALSE], truth, labels_sim_gam, 3, 3)
+save_pdf("simulation_gamma.pdf",
+         function() plot_simulation(est[conv, , drop = FALSE], truth, labels_sim_gam, 3, 3), 12, 8)
+```
+
+# 9 Coverage of the bootstrap intervals
+
+```{r gam-coverage}
+ctx <- list(spec = spec_gam, data = Milk, idx = gam$idx, dgp = gam$dgp, truth = gam$truth,
+            names = gam$names, R_boot = P$gam$R_boot_cov, J_cov = P$gam$J_cov)
+gam$cov <- with_cache("gam_coverage", P$gam[c("S_cov", "R_boot_cov", "J_cov")],
+  do.call(rbind, run_parallel(P$gam$S_cov, task_coverage, ctx, seed = 2024,
+    ckpt = checkpoint_dir("gam_coverage", P$gam[c("S_cov", "R_boot_cov", "J_cov")]))))
+rc <- coverage_summary(gam$cov, truth, est[conv, , drop = FALSE], gam$names)
+cat(sprintf("Replicates with converged original fit: %d of %d\n", rc$n_valid, nrow(gam$cov)))
+knitr::kable(rc$coverage, caption = "Tables 8, S16 (gamma). Coverage of the 95% intervals")
+knitr::kable(rc$bias, caption = "Table 8b (gamma). Bootstrap versus true bias and standard error")
+knitr::kable(paired_comparison(gam$cov, gam$names), caption = "Table S17 (gamma). Bootstrap versus robust Wald, paired")
+```
+
+# Session information
+
+```{r session}
+sessionInfo()
+```
