@@ -536,6 +536,63 @@ save_pdf <- function(file, drawing, width = 8, height = 8) {
   drawing()
 }
 
+## Heat plots of the quantile residuals:
+## (a) quantile residual against the fitted value and (b) worm plot, as density plots of the
+## residuals of R randomizations (R = 1 for continuous responses), with smooth trend curves.
+## The worm plot bands assume independent residuals with known parameters.
+heat_plot <- function(dist, y, mu, phi, R = 1, xlab = "Fitted value", ylim_wp = NULL) {
+  n <- length(y)
+  rq_matrix <- matrix(replicate(R, quantile_residual(dist, y, mu, phi)), nrow = n)
+  rq <- c(rq_matrix)
+  rq_theor <- qnorm(ppoints(n))
+  rq_cente <- apply(rq_matrix, 2, sort) - rq_theor
+  se <- sqrt(ppoints(n) * (1 - ppoints(n)) / n) / dnorm(rq_theor)
+  conf_upp <- qnorm(0.975) * se
+  conf_low <- qnorm(0.025) * se
+  if (is.null(ylim_wp)) {
+    m <- max(abs(range(rq_cente[6:(n - 5), ])), conf_upp[round(0.01 * n)])
+    ylim_wp <- c(-1, 1) * ceiling(10 * 1.15 * m) / 10
+  }
+  ylim_r <- c(-1, 1) * max(3.5, ceiling(max(abs(rq))))
+  ramp <- colorRampPalette(c("white", viridisLite::viridis(11, option = "inferno", direction = -1)))
+  trend_line <- function(x, y) {
+    lines(x, y, col = "white", lwd = 4)
+    lines(x, y, col = "black", lwd = 1.8)
+  }
+  op <- par(mfrow = c(1, 2), mar = c(3.9, 4.0, 1.6, 0.6), mgp = c(2.6, 0.6, 0), las = 1,
+            cex.lab = 1, cex.axis = 0.85, tcl = -0.3)
+  on.exit(par(op))
+
+  ## (a) quantile residual against the fitted value, with the smooth mean residual
+  smoothScatter(rq ~ rep(mu, R), xlab = xlab, ylab = "Quantile residual", colramp = ramp,
+                nbin = 200, nrpoints = 50, col = "grey30", pch = 19, cex = 0.3, ylim = ylim_r,
+                useRaster = TRUE)
+  abline(h = 0, lwd = 1.4, lty = 2)
+  abline(h = c(-2, 2), lwd = 1, lty = 3, col = "grey40")
+  mu_rep <- rep(mu, R)
+  grid <- seq(min(mu), max(mu), length.out = 200)
+  trend_line(grid, predict(mgcv::gam(rq ~ s(mu_rep, k = 10)), data.frame(mu_rep = grid)))
+  u <- par("usr"); w <- diff(u[1:2]); h <- diff(u[3:4])
+  x0 <- u[2] - 0.30 * w; x1 <- u[2] - 0.04 * w; y0 <- u[4] - 0.09 * h; y1 <- u[4] - 0.05 * h
+  rasterImage(as.raster(matrix(ramp(100), nrow = 1)), x0, y0, x1, y1, interpolate = TRUE)
+  rect(x0, y0, x1, y1, border = "grey40", lwd = 0.5)
+  text(c(x0, x1), y0, c("low", "high"), pos = 1, cex = 0.6, offset = 0.25)
+  text((x0 + x1) / 2, y1, "density", pos = 3, cex = 0.6, offset = 0.2)
+  mtext("(a)", side = 3, adj = 0, line = 0.3, font = 2)
+
+  ## (b) worm plot, with a smooth curve of the (median, if R > 1) worm
+  smoothScatter(rq_cente ~ rep(rq_theor, R), xlab = "Theoretical quantile",
+                ylab = "Centered quantile residual", colramp = ramp, nbin = 200, nrpoints = 0,
+                ylim = ylim_wp, useRaster = TRUE)
+  worm <- if (R > 1) apply(rq_cente, 1, median) else rq_cente[, 1]
+  trend_line(rq_theor, predict(mgcv::gam(worm ~ s(rq_theor, k = 10))))
+  abline(h = 0, lwd = 1.4, lty = 2)
+  lines(rq_theor, conf_upp, lwd = 1.4, lty = 2)
+  lines(rq_theor, conf_low, lwd = 1.4, lty = 2)
+  mtext("(b)", side = 3, adj = 0, line = 0.3, font = 2)
+  invisible(c(pct_outside_wp = mean(rq_cente > conf_upp | rq_cente < conf_low)))
+}
+
 ## ---- Model selection ----
 structures <- c(Independence = "Independence", Exchangeable = "Exchangeable",
                 "AR(1)" = "AR-M-dependent(1)", "AR(2)" = "AR-M-dependent(2)", "AR(3)" = "AR-M-dependent(3)")

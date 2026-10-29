@@ -235,6 +235,18 @@ save_pdf("wp_bernoulli_year.pdf", function() invisible(capture.output(
   wp_by_value(ber$r_quant, Poly$year + 2002, ylim_all = 0.8, label = "Year"))))
 ```
 
+Heat plots of the quantile residuals with 50 randomizations (Figure 3). The random number state is restored afterwards, so the rest of the report is unchanged.
+
+```{r ber-heat, fig.width = 9, fig.height = 4.3}
+plot_heat_b <- function() {
+  old <- .Random.seed; on.exit(assign(".Random.seed", old, envir = globalenv()))
+  set.seed(2026, kind = "L'Ecuyer-CMRG")
+  heat_plot("bernoulli", ber$y, ber$mu, ber$phi, R = 50, xlab = "Fitted probability")
+}
+cat(sprintf("Worm plot: %.1f%% of the points outside the bands\n", 100 * plot_heat_b()))
+save_pdf("heat_bernoulli.pdf", plot_heat_b, width = 7, height = 3.3)
+```
+
 # 6 Residual sums by year and sensitivity to the time trend
 
 ```{r ber-year}

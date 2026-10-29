@@ -12,9 +12,9 @@ All the results of the paper *On bootstrap in generalized estimating equations* 
 ## Repository Structure
 | Path | Content |
 |---|---|
-| `functions.R` | Functions shared by both applications: GEE fitting, cluster bootstrap and BCa intervals, quantile residuals, Gaussian copula and NORTA calibration, simulated envelopes and global test, simulation tools. |
-| `Application 1 - Bernoulli/Bernoulli.Rmd` | Application 1: data and model selection, bootstrap, envelope and worm plots, envelope diagnostics, type I error and power of the envelope test, simulation study. |
-| `Application 2 - Gamma/Gamma.Rmd` | Application 2: data, bootstrap, envelope and worm plots, sensitivity analysis, type I error of the envelope test, simulation study. |
+| `functions.R` | Functions shared by both applications: GEE fitting, cluster bootstrap and BCa intervals, quantile residuals, heat plots, Gaussian copula and NORTA calibration, simulated envelopes and global test, simulation tools. |
+| `Application 1 - Bernoulli/Bernoulli.Rmd` | Application 1: data and model selection, bootstrap, envelope, heat plots and worm plots, envelope diagnostics, type I error and power of the envelope test, simulation study. |
+| `Application 2 - Gamma/Gamma.Rmd` | Application 2: data, bootstrap, envelope, heat plots and worm plots, sensitivity analysis, type I error of the envelope test, simulation study. |
 | `*.html` (in each folder) | Rendered reports, with the code and all the outputs (tables and figures). Download them and open them in a web browser. |
 
 The rendered reports can be viewed online:
@@ -36,13 +36,14 @@ The datasets are available in R packages:
 The implementation includes:
 1. **GEE Modeling:** Parameter estimation with the `glmtoolbox` package, with AR(2) working correlation structures and lags measured in time units.
 2. **Bootstrap BCa:** Cluster bootstrap with percentile, basic and BCa intervals, providing inference for the regression coefficients and also for the dispersion and correlation parameters.
-3. **Simulated Envelopes:** Diagnostic tool for quantile residuals. The responses are simulated through Gaussian copulas that reproduce the intra-cluster dependence of the fitted model (with NORTA calibration for binary responses), the model is refitted to every simulated sample, and a global Monte Carlo test complements the graph.
-4. **Simulation Studies:** Bias of the estimators, coverage of the Wald and bootstrap intervals, and type I error and power of the envelope test.
+3. **Heat Plots:** Quantile residuals against the fitted values and worm plots drawn as density plots of many randomizations of the residuals (function `heat_plot` in `functions.R`), with smooth trend curves that indicate where the model fails.
+4. **Simulated Envelopes:** Diagnostic tool for quantile residuals. The responses are simulated through Gaussian copulas that reproduce the intra-cluster dependence of the fitted model (with NORTA calibration for binary responses), the model is refitted to every simulated sample, and a global Monte Carlo test complements the graph.
+5. **Simulation Studies:** Bias of the estimators, coverage of the Wald and bootstrap intervals, and type I error and power of the envelope test.
 
 ## Required Packages
 To run the code, install the following dependencies:
 ```R
-install.packages(c("glmtoolbox", "aplore3", "nlme", "gamlss", "pbivnorm", "Matrix", "ggplot2", "pbapply", "rmarkdown"))
+install.packages(c("glmtoolbox", "aplore3", "nlme", "gamlss", "pbivnorm", "Matrix", "ggplot2", "pbapply", "viridisLite", "rmarkdown"))
 ```
 
 ## Running the Code

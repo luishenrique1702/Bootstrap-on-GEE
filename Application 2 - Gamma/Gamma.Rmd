@@ -212,10 +212,19 @@ ggsave(file.path(DIR_FIG, "envelope_gamma.pdf"), g, width = 6, height = 6, devic
 plot_wp_g <- function() invisible(capture.output(wp(resid = gam$r_quant, ylim.all = 1)))
 plot_wp_g()
 save_pdf("wp_gamma.pdf", plot_wp_g)
-## Worm plots by intervals of weeks (Figure 8)
+## Worm plots by intervals of weeks (Figure S4)
 weeks <- list("1-2" = 1:2, "3-4" = 3:4, "5-6" = 5:6, "7-8" = 7:8, "9-10" = 9:10, "11-13" = 11:13, "14-16" = 14:16, "17-19" = 17:19)
 save_pdf("wp_gamma_weeks.pdf", function() invisible(capture.output(
   wp_by_value(gam$r_quant, Milk$Time, ylim_all = 1, label = "Weeks", groups = weeks))))
+```
+
+Heat plot of the quantile residuals (Figure 7; R = 1, since the residuals are not randomized).
+
+```{r gam-heat, fig.width = 9, fig.height = 4.3}
+plot_heat_g <- function()
+  heat_plot("gamma", gam$y, gam$mu, gam$phi, R = 1, xlab = "Fitted protein content")
+cat(sprintf("Worm plot: %.1f%% of the points outside the bands\n", 100 * plot_heat_g()))
+save_pdf("heat_gamma.pdf", plot_heat_g, width = 7, height = 3.3)
 ```
 
 # 6 Sensitivity to the form of the time trend
