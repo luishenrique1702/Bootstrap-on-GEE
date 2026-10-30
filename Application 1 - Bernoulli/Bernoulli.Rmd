@@ -98,6 +98,7 @@ plot_age <- function() {
   axis(1, at = (1:7) * 3, labels = 2002:2008)
   legend("topleft", c("At most 3 medications", "More than 3 medications"), fill = c("#56B4E9", "#E69F00"), bty = "n")
 }
+plot_age()
 save_pdf("boxplot_age_Bernoulli.pdf", plot_age, 8, 5)
 
 ## Table 1: criteria by correlation structure, model with all the covariates
@@ -231,8 +232,11 @@ plot_wp <- function() invisible(capture.output({
 }))
 plot_wp()
 save_pdf("wp_bernoulli.pdf", plot_wp)
-save_pdf("wp_bernoulli_year.pdf", function() invisible(capture.output(
-  wp_by_value(ber$r_quant, Poly$year + 2002, ylim_all = 0.8, label = "Year"))))
+## Worm plots by year (Figure S3)
+plot_wp_year <- function() invisible(capture.output(
+  wp_by_value(ber$r_quant, Poly$year + 2002, ylim_all = 0.8, label = "Year")))
+plot_wp_year()
+save_pdf("wp_bernoulli_year.pdf", plot_wp_year)
 ```
 
 Heat plots of the quantile residuals with 50 randomizations (Figure 3). The random number state is restored afterwards, so the rest of the report is unchanged.

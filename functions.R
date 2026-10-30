@@ -332,6 +332,17 @@ EXPORT <- c(EXPORT, "envelope_replicate")
 
 task_envelope <- function(k, ctx) envelope_replicate(ctx$spec, ctx$data, ctx$dgp)
 
+## Residuals (in the original order) of a sample simulated from the fitted model and refitted
+residual_replicate <- function(spec, data, dgp) {
+  y <- generate_y(dgp)
+  d <- data; d[[spec$resp]] <- y
+  fit <- fit_gee(spec, d)
+  if (is.null(fit)) return(NULL)
+  quantile_residual(spec$dist, y, mean_from(spec, d, as.numeric(coef(fit))), fit$phi)
+}
+EXPORT <- c(EXPORT, "residual_replicate")
+task_residuals <- function(k, ctx) residual_replicate(ctx$spec, ctx$data, ctx$dgp)
+
 ## Type I error / power: generate from the true model, fit spec_fit, build a
 ## complete envelope with refitting and return the proportion outside the band
 ## and the p-value of the global test.
@@ -592,6 +603,61 @@ heat_plot <- function(dist, y, mu, phi, R = 1, xlab = "Fitted value", ylim_wp = 
   mtext("(b)", side = 3, adj = 0, line = 0.3, font = 2)
   invisible(c(pct_outside_wp = mean(rq_cente > conf_upp | rq_cente < conf_low)))
 }
+
+## Moment bucket plot (De Bastiani et al., 2022) adapted to GEE: transformed moment skewness and
+## kurtosis of the quantile residuals (continuous responses), with
+##  - a cluster bootstrap cloud (clusters resampled) for the uncertainty of the observed point;
+##  - a reference cloud from samples simulated from the fitted model (Gaussian copula) and
+##    refitted, replacing the Jarque-Bera region, which assumes independent residuals;
+##  - a Monte Carlo p-value from the Mahalanobis distances of the B + 1 points.
+## r_obs: observed residuals; R_sim: N x B matrix of simulated residuals (original order);
+## idx: list of the rows of each cluster; rows: subset of observations.
+bucket_stats <- function(r_obs, R_sim, idx, rows = seq_along(r_obs), n_boot = 499, seed = 2028) {
+  tsk <- function(r) { m <- gamlss.dist::momentSK(r); c(x = m$trans.mom.skew, y = m$trans.mom.kurt) }
+  obs <- tsk(r_obs[rows])
+  sim <- t(apply(R_sim[rows, , drop = FALSE], 2, tsk))
+  cl <- lapply(idx, intersect, rows); cl <- cl[lengths(cl) > 0]
+  old <- if (exists(".Random.seed", envir = globalenv())) get(".Random.seed", envir = globalenv())
+  on.exit(if (!is.null(old)) assign(".Random.seed", old, envir = globalenv()))
+  set.seed(seed, kind = "L'Ecuyer-CMRG")
+  boot <- t(replicate(n_boot, tsk(r_obs[unlist(cl[sample.int(length(cl), replace = TRUE)])])))
+  ## Monte Carlo test: Mahalanobis distances of the observed and simulated points
+  all <- rbind(obs, sim)
+  d <- mahalanobis(all, colMeans(all), cov(all))
+  p <- mean(d >= d[1])
+  ## 95% region of the simulated points: ellipse with radius given by their 95% distance quantile
+  m <- colMeans(sim); S <- cov(sim)
+  q95 <- quantile(mahalanobis(sim, m, S), 0.95, names = FALSE)
+  th <- seq(0, 2 * pi, length.out = 200)
+  ell <- t(m + t(chol(S)) %*% rbind(cos(th), sin(th)) * sqrt(q95))
+  ## Jarque-Bera 95% region for independent residuals, for comparison
+  n <- length(rows)
+  u <- seq(-0.99, 0.99, length.out = 400); g1 <- u / (1 - abs(u))
+  g2 <- (24 / n) * (qchisq(0.95, 2) - (n / 6) * g1^2)
+  ok <- g2 >= 0; g1 <- g1[ok]; g2 <- sqrt(g2[ok])
+  jb <- data.frame(x = c(g1, rev(g1)), y = c(g2, -rev(g2)))
+  jb <- data.frame(x = jb$x / (1 + abs(jb$x)), y = jb$y / (1 + abs(jb$y)))
+  list(obs = obs, sim = as.data.frame(sim), boot = as.data.frame(boot), p = p,
+       ell = data.frame(x = ell[, 1], y = ell[, 2]), jb = jb, n = n,
+       moments = gamlss.dist::momentSK(r_obs[rows])[c("mom.skew", "excess.mom.kurt")])
+}
+
+## ggplot of a bucket_stats object on the gray background of gamlss.ggplots
+bucket_plot <- function(b, title = NULL, lim = NULL, base_size = 8) {
+  g <- gamlss.ggplots::moment_gray_both() +
+    ggplot2::geom_polygon(data = b$jb, ggplot2::aes(x, y), fill = "#56B4E9", alpha = 0.35, inherit.aes = FALSE) +
+    ggplot2::geom_point(data = b$sim, ggplot2::aes(x, y), colour = "grey40", size = 0.35, alpha = 0.6, inherit.aes = FALSE) +
+    ggplot2::geom_path(data = b$ell, ggplot2::aes(x, y), colour = "black", linetype = 2, linewidth = 0.4, inherit.aes = FALSE) +
+    ggplot2::geom_point(data = b$boot, ggplot2::aes(x, y), colour = "#D55E00", size = 0.35, alpha = 0.45, inherit.aes = FALSE) +
+    ggplot2::annotate("point", x = b$obs["x"], y = b$obs["y"], shape = 21, size = 2.2, fill = "black", colour = "white") +
+    ggplot2::labs(x = "transformed moment skewness", y = "transformed moment excess kurtosis", title = title) +
+    ggplot2::theme(legend.position = "none", text = ggplot2::element_text(size = base_size),
+                   axis.text = ggplot2::element_text(size = base_size - 1),
+                   plot.title = ggplot2::element_text(face = "bold", size = base_size + 1))
+  if (!is.null(lim)) g <- g + ggplot2::coord_cartesian(xlim = c(-lim, lim), ylim = c(-lim, lim))
+  g
+}
+
 
 ## ---- Model selection ----
 structures <- c(Independence = "Independence", Exchangeable = "Exchangeable",

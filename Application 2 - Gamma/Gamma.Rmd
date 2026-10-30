@@ -214,8 +214,10 @@ plot_wp_g()
 save_pdf("wp_gamma.pdf", plot_wp_g)
 ## Worm plots by intervals of weeks (Figure S4)
 weeks <- list("1-2" = 1:2, "3-4" = 3:4, "5-6" = 5:6, "7-8" = 7:8, "9-10" = 9:10, "11-13" = 11:13, "14-16" = 14:16, "17-19" = 17:19)
-save_pdf("wp_gamma_weeks.pdf", function() invisible(capture.output(
-  wp_by_value(gam$r_quant, Milk$Time, ylim_all = 1, label = "Weeks", groups = weeks))))
+plot_wp_weeks <- function() invisible(capture.output(
+  wp_by_value(gam$r_quant, Milk$Time, ylim_all = 1, label = "Weeks", groups = weeks)))
+plot_wp_weeks()
+save_pdf("wp_gamma_weeks.pdf", plot_wp_weeks)
 ```
 
 Heat plot of the quantile residuals (Figure 7; R = 1, since the residuals are not randomized).
@@ -225,6 +227,48 @@ plot_heat_g <- function()
   heat_plot("gamma", gam$y, gam$mu, gam$phi, R = 1, xlab = "Fitted protein content")
 cat(sprintf("Worm plot: %.1f%% of the points outside the bands\n", 100 * plot_heat_g()))
 save_pdf("heat_gamma.pdf", plot_heat_g, width = 7, height = 3.3)
+```
+
+Bucket plot of the quantile residuals adapted to GEE (Figure 8 and, by intervals of weeks, Figure S5): cluster bootstrap cloud, reference cloud from B samples simulated from the fitted model and refitted (residuals kept in the original order), and Monte Carlo p-value.
+
+```{r gam-bucket, fig.width = 9, fig.height = 4.7}
+ctx <- list(spec = spec_gam, data = Milk, dgp = gam$dgp)
+res_sim <- with_cache("gam_bucket", P$gam$B_env,
+                      run_parallel(P$gam$B_env, task_residuals, ctx, seed = 666))
+R_sim <- do.call(cbind, res_sim[!vapply(res_sim, is.null, logical(1))])
+cat(sprintf("Simulated samples: %d\n", ncol(R_sim)))
+
+bk <- bucket_stats(gam$r_quant, R_sim, gam$idx)
+cat(sprintf("Skewness %.3f, excess kurtosis %.3f (transformed %.3f, %.3f) | Monte Carlo p-value %.3f\n",
+            bk$moments$mom.skew, bk$moments$excess.mom.kurt, bk$obs["x"], bk$obs["y"], bk$p))
+cat(sprintf("SD of the transformed skewness and kurtosis: simulated %.3f, %.3f | cluster bootstrap %.3f, %.3f\n",
+            sd(bk$sim$x), sd(bk$sim$y), sd(bk$boot$x), sd(bk$boot$y)))
+## (b): detail around the points
+pts <- rbind(as.matrix(bk$sim), as.matrix(bk$boot), as.matrix(bk$ell))
+pad <- 0.08 * diff(range(pts))
+xl <- range(pts[, 1]) + c(-1, 1) * pad; yl <- range(pts[, 2]) + c(-1, 1) * pad
+plot_bucket <- function() gridExtra::grid.arrange(
+  bucket_plot(bk, "(a)"),
+  bucket_plot(bk, "(b)") + ggplot2::coord_cartesian(xlim = xl, ylim = yl),
+  ncol = 2)
+plot_bucket()
+save_pdf("bucket_gamma.pdf", plot_bucket, width = 7, height = 3.5)
+
+```
+
+```{r gam-bucket-weeks, fig.width = 9, fig.height = 5.6}
+## By intervals of weeks (Figure S5)
+bw <- lapply(weeks, function(w) bucket_stats(gam$r_quant, R_sim, gam$idx, which(Milk$Time %in% w)))
+knitr::kable(round(rbind(n = sapply(bw, `[[`, "n"), skewness = sapply(bw, function(b) b$moments$mom.skew),
+                         excess_kurtosis = sapply(bw, function(b) b$moments$excess.mom.kurt),
+                         p_value = sapply(bw, `[[`, "p")), 3),
+             caption = "Bucket plot by intervals of weeks")
+plot_bucket_w <- function() gridExtra::grid.arrange(
+  grobs = lapply(names(bw), function(nm)
+    bucket_plot(bw[[nm]], sprintf("Weeks %s", nm), base_size = 6.5)),
+  ncol = 4)
+plot_bucket_w()
+save_pdf("bucket_gamma_weeks.pdf", plot_bucket_w, width = 7, height = 4.3)
 ```
 
 # 6 Sensitivity to the form of the time trend
